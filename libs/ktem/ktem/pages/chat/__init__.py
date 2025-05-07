@@ -52,7 +52,7 @@ REASONING_LIMITS = 2 if KH_DEMO_MODE else 10
 DEFAULT_SETTING = "(default)"
 INFO_PANEL_SCALES = {True: 8, False: 4}
 DEFAULT_QUESTION = (
-    "What is the summary of this document?"
+    "Résume ce document"
     if not KH_DEMO_MODE
     else "What is the summary of this paper?"
 )

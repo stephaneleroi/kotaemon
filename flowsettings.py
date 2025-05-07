@@ -194,39 +194,31 @@ if VOYAGE_API_KEY:
 if config("LOCAL_MODEL", default=""):
     KH_LLMS["ollama"] = {
         "spec": {
-            "__type__": "kotaemon.llms.ChatOpenAI",
-            "base_url": KH_OLLAMA_URL,
-            "model": config("LOCAL_MODEL", default="qwen2.5:7b"),
-            "api_key": "ollama",
-        },
-        "default": False,
-    }
-    KH_LLMS["ollama-long-context"] = {
-        "spec": {
             "__type__": "kotaemon.llms.LCOllamaChat",
             "base_url": KH_OLLAMA_URL.replace("v1/", ""),
-            "model": config("LOCAL_MODEL", default="qwen2.5:7b"),
+            "model": config("LOCAL_MODEL", default="long_lama3.3:latest"),
             "num_ctx": 8192,
         },
-        "default": False,
+        "default": True,
     }
+    if "openai" in KH_LLMS:
+        KH_LLMS["openai"]["default"] = False
+    if "ollama-long-context" in KH_LLMS:
+        KH_LLMS["ollama-long-context"]["default"] = False
 
-    KH_EMBEDDINGS["ollama"] = {
+    KH_EMBEDDINGS["huggingface"] = {
         "spec": {
-            "__type__": "kotaemon.embeddings.OpenAIEmbeddings",
-            "base_url": KH_OLLAMA_URL,
-            "model": config("LOCAL_MODEL_EMBEDDINGS", default="nomic-embed-text"),
-            "api_key": "ollama",
+            "__type__": "kotaemon.embeddings.LCHuggingFaceEmbeddings",
+            "model_name": config("HUGGINGFACE_EMBEDDING_MODEL", default="intfloat/multilingual-e5-large-instruct"),
         },
-        "default": False,
+        "default": True,
     }
-    KH_EMBEDDINGS["fast_embed"] = {
-        "spec": {
-            "__type__": "kotaemon.embeddings.FastEmbedEmbeddings",
-            "model_name": "BAAI/bge-base-en-v1.5",
-        },
-        "default": False,
-    }
+    if "openai" in KH_EMBEDDINGS:
+        KH_EMBEDDINGS["openai"]["default"] = False
+    if "ollama" in KH_EMBEDDINGS:
+        KH_EMBEDDINGS["ollama"]["default"] = False
+    if "fast_embed" in KH_EMBEDDINGS:
+        KH_EMBEDDINGS["fast_embed"]["default"] = False
 
 # additional LLM configurations
 KH_LLMS["claude"] = {
@@ -243,7 +235,7 @@ KH_LLMS["google"] = {
         "model_name": "gemini-1.5-flash",
         "api_key": GOOGLE_API_KEY,
     },
-    "default": not IS_OPENAI_DEFAULT,
+    "default": False,
 }
 KH_LLMS["groq"] = {
     "spec": {
@@ -288,7 +280,7 @@ KH_EMBEDDINGS["google"] = {
         "model": "models/text-embedding-004",
         "google_api_key": GOOGLE_API_KEY,
     },
-    "default": not IS_OPENAI_DEFAULT,
+    "default": False,
 }
 KH_EMBEDDINGS["mistral"] = {
     "spec": {
@@ -298,13 +290,6 @@ KH_EMBEDDINGS["mistral"] = {
     },
     "default": False,
 }
-# KH_EMBEDDINGS["huggingface"] = {
-#     "spec": {
-#         "__type__": "kotaemon.embeddings.LCHuggingFaceEmbeddings",
-#         "model_name": "sentence-transformers/all-mpnet-base-v2",
-#     },
-#     "default": False,
-# }
 
 # default reranking models
 KH_RERANKINGS["cohere"] = {
@@ -342,7 +327,7 @@ SETTINGS_REASONING = {
     },
     "lang": {
         "name": "Language",
-        "value": "en",
+        "value": "fr",
         "choices": [(lang, code) for code, lang in SUPPORTED_LANGUAGE_MAP.items()],
         "component": "dropdown",
     },
@@ -402,3 +387,8 @@ KH_INDICES = [
     },
     *GRAPHRAG_INDICES,
 ]
+
+FILE_INDEX_PIPELINE_FILE_EXTRACTORS = {
+    ".pdf": "kotaemon.loaders.docling_loader.DoclingReader",
+    # Ajoute d'autres extensions si tu veux que Docling soit utilisé pour plus que les PDF
+}
