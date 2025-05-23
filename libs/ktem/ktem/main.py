@@ -5,6 +5,7 @@ from ktem.pages.chat import ChatPage
 from ktem.pages.help import HelpPage
 from ktem.pages.resources import ResourcesTab
 from ktem.pages.settings import SettingsPage
+from ktem.pages.summarization import SummarizationPage
 from ktem.pages.setup import SetupPage
 from theflow.settings import settings as flowsettings
 
@@ -59,6 +60,16 @@ class App(BaseApp):
                 visible=not self.f_user_management,
             ) as self._tabs["chat-tab"]:
                 self.chat_page = ChatPage(self)
+
+            # Add the new Summarization Tab
+            with gr.Tab(
+                "Summarization",
+                elem_id="summarization-tab",
+                id="summarization-tab",
+                visible=not self.f_user_management,
+                elem_classes=["fill-main-area-height", "scrollable"],
+            ) as self._tabs["summarization-tab"]:
+                self.summarization_page = SummarizationPage(self)
 
             if len(self.index_manager.indices) == 1:
                 for index in self.index_manager.indices:
@@ -161,6 +172,8 @@ class App(BaseApp):
                         tabs_update.append(gr.update(visible=False))
                     elif k == "resources-tab":
                         tabs_update.append(gr.update(visible=is_admin))
+                    elif k == "summarization-tab": # Handle Summarization tab visibility
+                        tabs_update.append(gr.update(visible=True))
                     else:
                         tabs_update.append(gr.update(visible=True))
 
