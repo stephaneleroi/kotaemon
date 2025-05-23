@@ -321,9 +321,6 @@ class ChatPage(BasePage):
                 ) as self.chat_settings:
                     with gr.Row(elem_id="quick-setting-labels"):
                         gr.HTML("Reasoning method")
-                        gr.HTML(
-                            "Model", visible=not KH_DEMO_MODE and not KH_SSO_ENABLED
-                        )
                         gr.HTML("Language")
 
                     with gr.Row():
@@ -345,13 +342,6 @@ class ChatPage(BasePage):
                             value=reasoning_setting.value,
                             container=False,
                             show_label=False,
-                        )
-                        self.model_type = gr.Dropdown(
-                            choices=model_setting.choices,
-                            value=model_setting.value,
-                            container=False,
-                            show_label=False,
-                            visible=not KH_DEMO_MODE and not KH_SSO_ENABLED,
                         )
                         self.language = gr.Dropdown(
                             choices=language_setting.choices,
@@ -457,7 +447,6 @@ class ChatPage(BasePage):
                     self.chat_panel.chatbot,
                     self._app.settings_state,
                     self._reasoning_type,
-                    self.model_type,
                     self.use_mindmap,
                     self.citation,
                     self.language,
@@ -1169,7 +1158,6 @@ class ChatPage(BasePage):
         self,
         settings: dict,
         session_reasoning_type: str,
-        session_llm: str,
         session_use_mindmap: bool | str,
         session_use_citation: str,
         session_language: str,
@@ -1200,24 +1188,32 @@ class ChatPage(BasePage):
             "language",
             session_language,
         )
-        print("Session LLM", session_llm)
+        settings = deepcopy(settings)
+
+        # Get the default LLM name from the app's LLM manager
+        default_llm_name = self._app.llms.get_default_name()
+        
+        # Determine the reasoning_id to construct the correct setting key
+        # This requires getting reasoning_cls first. So, slight reorder:
+        # First, determine reasoning_mode and reasoning_cls
         reasoning_mode = (
             settings["reasoning.use"]
             if session_reasoning_type in (DEFAULT_SETTING, None)
             else session_reasoning_type
         )
         reasoning_cls = reasonings[reasoning_mode]
-        print("Reasoning class", reasoning_cls)
         reasoning_id = reasoning_cls.get_info()["id"]
+        print("Reasoning class", reasoning_cls)
 
-        settings = deepcopy(settings)
+        # Now, set the LLM for this reasoning pipeline to the application default
         llm_setting_key = f"reasoning.options.{reasoning_id}.llm"
-        if llm_setting_key in settings and session_llm not in (
-            DEFAULT_SETTING,
-            None,
-            "",
-        ):
-            settings[llm_setting_key] = session_llm
+        if default_llm_name and llm_setting_key in settings:
+            settings[llm_setting_key] = default_llm_name
+            print(f"Pipeline for {reasoning_id} will use default app LLM: {default_llm_name}")
+        elif llm_setting_key not in settings:
+            print(f"Warning: LLM setting key {llm_setting_key} not found in settings for {reasoning_id}.")
+        elif not default_llm_name:
+            print(f"Warning: No default LLM name found from app manager for {reasoning_id}.")
 
         if session_use_mindmap not in (DEFAULT_SETTING, None):
             settings["reasoning.options.simple.create_mindmap"] = session_use_mindmap
@@ -1269,7 +1265,6 @@ class ChatPage(BasePage):
         chat_history,
         settings,
         reasoning_type,
-        llm_type,
         use_mind_map,
         use_citation,
         language,
@@ -1292,7 +1287,6 @@ class ChatPage(BasePage):
         pipeline, reasoning_state = self.create_pipeline(
             settings,
             reasoning_type,
-            llm_type,
             use_mind_map,
             use_citation,
             language,

@@ -8,9 +8,7 @@ class SummarizationPage:
         self._app = app
         # Define UI elements here so they can be accessed by other methods if needed
         self.doc_path_input = None
-        self.llm_dropdown = None
         self.target_length_slider = None
-        self.chunk_size_input = None
         self.batch_size_input = None
         self.summarize_button = None
         self.summary_output_textbox = None
@@ -18,30 +16,55 @@ class SummarizationPage:
         
         self._build_ui()
 
-    async def _handle_summarize(self, doc_path, llm_choice, target_length, chunk_size, batch_size):
+    async def _handle_summarize(self, doc_path, target_pages, batch_size):
         if not doc_path:
             gr.Warning("Document path cannot be empty.")
             return "", None # Return empty values for outputs
 
         try:
             # Ensure integer types for pipeline parameters
-            target_length = int(target_length)
-            chunk_size = int(chunk_size)
             batch_size = int(batch_size)
+
+            TOKENS_PER_PAGE = 333  # Conversion factor: (250 words/page * 1.33 tokens/word)
+            target_pages_int = int(target_pages) # Ensure it's an integer
+            target_llm_token_length = target_pages_int * TOKENS_PER_PAGE
+            gr.Info(f"Target summary length: {target_pages_int} page(s) (~{target_llm_token_length} tokens)")
 
             # Get LLM instance from the app's LLM pool
             # In a real app, self._app.llms would be populated.
             # For standalone testing, self._app.llms[llm_choice] will be handled by MockLLMPool
-            llm_instance = self._app.llms[llm_choice]
+            llm_instance = self._app.llms.get_default()
+
+            dynamic_chunk_size = 2000  # Default fallback chunk size
+            try:
+                if hasattr(llm_instance, 'num_ctx') and isinstance(llm_instance.num_ctx, int):
+                    # Use 50% of the context window for chunk size, ensure it's at least a minimum value (e.g. 512)
+                    calculated_size = int(llm_instance.num_ctx * 0.5)
+                    dynamic_chunk_size = max(calculated_size, 512) 
+                    gr.Info(f"Using dynamic chunk size: {dynamic_chunk_size} (50% of model context: {llm_instance.num_ctx})")
+                elif hasattr(llm_instance, '_obj') and hasattr(llm_instance._obj, 'num_ctx') and isinstance(llm_instance._obj.num_ctx, int):
+                    # Fallback for some Langchain wrappers that might store it in _obj.num_ctx
+                    calculated_size = int(llm_instance._obj.num_ctx * 0.5)
+                    dynamic_chunk_size = max(calculated_size, 512)
+                    gr.Info(f"Using dynamic chunk size: {dynamic_chunk_size} (50% of model context: {llm_instance._obj.num_ctx})")
+                else:
+                    gr.Warning(f"LLM attribute 'num_ctx' not found or not an integer. Using default chunk size: {dynamic_chunk_size}")
+            except Exception as e:
+                gr.Warning(f"Error accessing LLM context window: {str(e)}. Using default chunk size: {dynamic_chunk_size}")
 
             pipeline = SummarizationPipeline(
                 llm=llm_instance,
-                target_llm_token_length=target_length,
-                text_splitter_chunk_size=chunk_size,
+                target_llm_token_length=target_llm_token_length,
+                text_splitter_chunk_size=dynamic_chunk_size,
                 consolidation_batch_size=batch_size,
             )
             
-            gr.Info(f"Starting summarization for: {doc_path} with LLM: {llm_choice}")
+            default_llm_name = "default LLM"
+            try:
+                default_llm_name = self._app.llms.get_default_name()
+            except Exception:
+                gr.Warning("Could not determine default LLM name. Using generic name.")
+            gr.Info(f"Starting summarization for: {doc_path} with LLM: {default_llm_name}")
             # Assuming pipeline.arun can take a path directly.
             # If it expects content, file loading logic would be needed here.
             # For now, let's assume it handles file paths or directory paths.
@@ -76,42 +99,13 @@ class SummarizationPage:
                 )
 
             with gr.Accordion("Configuration", open=True):
-                llm_options = ["ollama/llama2", "openai/gpt-3.5-turbo"] 
-                default_llm = llm_options[0]
-                try:
-                    if hasattr(self._app, 'llms') and self._app.llms and hasattr(self._app.llms, 'options') and hasattr(self._app.llms, 'get_default_name'):
-                        available_llms = self._app.llms.options()
-                        if available_llms:
-                            llm_options = available_llms
-                            default_llm = self._app.llms.get_default_name()
-                            if default_llm not in llm_options:
-                                default_llm = llm_options[0] if llm_options else None
-                        else:
-                            gr.Warning("No LLMs available from app.llms.options(). Using placeholders.")
-                    else:
-                        gr.Info("self._app.llms not fully available. Using placeholder LLM options.")
-                except Exception as e:
-                    print(f"Error accessing LLMs from app: {e}. Using placeholders.")
-                    
-                self.llm_dropdown = gr.Dropdown(
-                    label="LLM for Summarization",
-                    choices=llm_options,
-                    value=default_llm,
-                    elem_id="summarization_llm_dropdown"
-                )
                 self.target_length_slider = gr.Slider(
-                    label="Target Summary Length (tokens)",
-                    minimum=50,
-                    maximum=2000,
-                    value=500,
-                    step=50,
+                    label="Target Summary Length (pages)",
+                    minimum=1,
+                    maximum=10,
+                    value=2,
+                    step=1,
                     elem_id="summarization_target_length_slider"
-                )
-                self.chunk_size_input = gr.Number(
-                    label="Chunk Size (tokens)",
-                    value=2000, 
-                    elem_id="summarization_chunk_size_input",
-                    precision=0 # Ensure integer input
                 )
                 self.batch_size_input = gr.Number(
                     label="Consolidation Batch Size",
@@ -145,12 +139,10 @@ class SummarizationPage:
 
             # Connect button to handler
             self.summarize_button.click(
-                self._handle_summarize,
+                self._handle_summarize, # Directly call _handle_summarize
                 inputs=[
                     self.doc_path_input,
-                    self.llm_dropdown,
                     self.target_length_slider,
-                    self.chunk_size_input,
                     self.batch_size_input
                 ],
                 outputs=[
