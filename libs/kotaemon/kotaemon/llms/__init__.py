@@ -20,6 +20,7 @@ from .completions import LLM, AzureOpenAI, LlamaCpp, OpenAI
 from .cot import ManualSequentialChainOfThought, Thought
 from .linear import GatedLinearPipeline, SimpleLinearPipeline
 from .prompts import BasePromptComponent, PromptTemplate
+from .summarization import SummarizationPipeline
 
 __all__ = [
     "BaseLLM",
@@ -56,4 +57,5 @@ __all__ = [
     # chain-of-thoughts
     "ManualSequentialChainOfThought",
     "Thought",
+    "SummarizationPipeline",
 ]
