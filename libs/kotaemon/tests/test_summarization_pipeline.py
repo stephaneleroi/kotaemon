@@ -1,13 +1,13 @@
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 from kotaemon.llms.summarization import SummarizationPipeline
 from kotaemon.base import Document
 from kotaemon.llms.base import BaseLLM, LLMInterface
-from kotaemon.indices.splitters import TokenSplitter
+from kotaemon.indices.splitters import TokenSplitter # Kept for other tests, not used in new one
 from kotaemon.loaders.base import BaseReader
-from kotaemon.embeddings.base import BaseEmbeddings
+from kotaemon.embeddings.base import BaseEmbeddings, DocumentWithEmbedding
 
 
 # Mock Classes
@@ -380,4 +380,245 @@ async def test_arun_overall_pipeline_flow(
     # This detail is more about testing the SummarizationPipeline's internal reader handling
     # than the overall flow of summarization logic. The current test is okay for the generic BaseReader path.
 
+
+@pytest.mark.asyncio
+@patch.object(SummarizationPipeline, '_agenerate_final_summary', new_callable=AsyncMock) # Mock to prevent full run
+@patch.object(SummarizationPipeline, '_asummarize_chunk', new_callable=AsyncMock)
+async def test_arun_smarter_context_selection(
+    mock_asummarize_chunk: AsyncMock,
+    mock_agenerate_final_summary: AsyncMock, # Added this mock
+):
+    # 1. Setup
+    mock_reader_instance = MockReader(documents=[Document(text="Initial content for reader")])
+    mock_splitter_instance = MockTokenSplitter() # Using existing mock, behavior of split not critical here
+    mock_llm_instance = MockLLM()
+    mock_embedding_model_instance = AsyncMock(spec=BaseEmbeddings)
+
+    pipeline = SummarizationPipeline(
+        reader=mock_reader_instance,
+        text_splitter=mock_splitter_instance,
+        llm=mock_llm_instance,
+        embedding_model=mock_embedding_model_instance,
+        use_semantic_context_for_chunks=True,
+        semantic_context_top_k=1,
+        target_chunk_summary_tokens=50 # Keep it small for test data
+    )
+    mock_agenerate_final_summary.return_value = "Final summary from mock"
+
+
+    # Define chunk texts
+    chunk_text1 = "Dogs are friendly pets."
+    chunk_text2 = "Cats are independent animals."
+    chunk_text3 = "Many people love their canine companions." # Intentionally similar to chunk1/summary1
+
+    chunks = [
+        Document(text=chunk_text1, id="chunk1"),
+        Document(text=chunk_text2, id="chunk2"),
+        Document(text=chunk_text3, id="chunk3"),
+    ]
+    mock_splitter_instance.run = MagicMock(return_value=chunks)
+
+    # Define summaries to be returned by _asummarize_chunk mock
+    summary1 = "Summary: Dogs are friendly."
+    summary2 = "Summary: Cats are independent."
+    summary3 = "Summary: People love dogs."
+
+    async def mock_asummarize_chunk_side_effect(chunk_doc, previous_chunk_summary, target_tokens):
+        if chunk_doc.text == chunk_text1: return summary1
+        if chunk_doc.text == chunk_text2: return summary2
+        if chunk_doc.text == chunk_text3: return summary3
+        return "default_summary"
+    mock_asummarize_chunk.side_effect = mock_asummarize_chunk_side_effect
+    
+    # Define mock embeddings map
+    # chunk_text3's embedding is designed to be most similar to summary1's embedding
+    mock_embeddings_map = {
+        chunk_text1: [0.9, 0.1, 0.1],  # vec_chunk1
+        summary1:    [0.88, 0.12, 0.11], # vec_summary1 (embedding of summary1)
+        chunk_text2: [0.1, 0.9, 0.1],  # vec_chunk2
+        summary2:    [0.12, 0.88, 0.11], # vec_summary2 (embedding of summary2)
+        chunk_text3: [0.85, 0.15, 0.15], # vec_chunk3 (embedding of chunk_text3, similar to vec_summary1)
+        summary3:    [0.83, 0.17, 0.16], # vec_summary3 (embedding of summary3)
+    }
+
+    async def mock_embedding_ainvoke_side_effect(texts_list, *args, **kwargs):
+        # Based on pipeline code: self.embedding_model.ainvoke([chunk.text]) or ainvoke([summary_str])
+        # So texts_list is a list containing one string.
+        text_input = texts_list[0]
+        emb = mock_embeddings_map.get(text_input, [0.0, 0.0, 0.0]) # Default if not in map
+        return [DocumentWithEmbedding(content=text_input, embedding=emb)]
+    
+    mock_embedding_model_instance.ainvoke.side_effect = mock_embedding_ainvoke_side_effect
+
+    # 2. Execution
+    await pipeline.arun(documents_path="dummy/path")
+
+    # 3. Assertions
+
+    # Embedding model calls
+    expected_embedding_calls = [
+        call([chunk_text1]), # Chunk 1 text
+        call([summary1]),    # Summary of Chunk 1
+        call([chunk_text2]), # Chunk 2 text
+        call([summary2]),    # Summary of Chunk 2
+        call([chunk_text3]), # Chunk 3 text
+        call([summary3]),    # Summary of Chunk 3
+    ]
+    mock_embedding_model_instance.ainvoke.assert_has_calls(expected_embedding_calls, any_order=False)
+    assert mock_embedding_model_instance.ainvoke.call_count == len(expected_embedding_calls)
+
+    # _asummarize_chunk calls and context verification
+    summarize_calls = mock_asummarize_chunk.call_args_list
+    assert len(summarize_calls) == 3
+
+    # Call 1 (Chunk 1)
+    # Args are (chunk_doc, previous_chunk_summary, target_tokens)
+    assert summarize_calls[0].args[0].text == chunk_text1
+    assert summarize_calls[0].args[1] is None # No context for the first chunk
+    assert summarize_calls[0].args[2] == pipeline.target_chunk_summary_tokens
+
+    # Call 2 (Chunk 2)
+    # Context should be summary1 (sequential fallback as only one past summary exists)
+    assert summarize_calls[1].args[0].text == chunk_text2
+    assert summarize_calls[1].args[1] == summary1 
+    assert summarize_calls[1].args[2] == pipeline.target_chunk_summary_tokens
+    
+    # Call 3 (Chunk 3)
+    # chunk_text3 embedding: [0.85, 0.15, 0.15]
+    # summary1 embedding:    [0.88, 0.12, 0.11] -> High similarity to chunk_text3
+    # summary2 embedding:    [0.12, 0.88, 0.11] -> Low similarity to chunk_text3
+    # So, summary1 should be chosen as context for chunk3.
+    assert summarize_calls[2].args[0].text == chunk_text3
+    assert summarize_calls[2].args[1] == summary1 
+    assert summarize_calls[2].args[2] == pipeline.target_chunk_summary_tokens
+
+
+@pytest.mark.asyncio
+async def test_llm_calls_retry_on_failure():
+    # Basic pipeline setup with minimal mocks for this specific test
+    mock_reader = MockReader(documents=[])
+    mock_splitter = MockTokenSplitter() # Actual splitter type not critical for this test
+    
+    # The pipeline.llm object needs to be an AsyncMock to control its ainvoke method
+    mock_llm_for_pipeline = AsyncMock(spec=BaseLLM)
+
+    pipeline = SummarizationPipeline(
+        reader=mock_reader,
+        text_splitter=mock_splitter,
+        llm=mock_llm_for_pipeline, # Assign the AsyncMock here
+        # Other params can be defaults
+    )
+
+    fail_exception = Exception("LLM call failed intentionally for test")
+    successful_response_content = "Retry successful content"
+    
+    # Create a mock response object similar to what LLM might return
+    # This needs to match what the SummarizationPipeline expects after a successful ainvoke
+    mock_successful_llm_response = MockLLMResponse(content=successful_response_content)
+
+
+    # Test retry for _ainvoke_llm_summarize_chunk
+    mock_llm_for_pipeline.ainvoke.reset_mock() # Reset before setting new side_effect
+    mock_llm_for_pipeline.ainvoke.side_effect = [
+        fail_exception, 
+        fail_exception, 
+        mock_successful_llm_response
+    ]
+    result_chunk = await pipeline._ainvoke_llm_summarize_chunk("Test prompt for chunk summary")
+    assert mock_llm_for_pipeline.ainvoke.call_count == 3
+    assert result_chunk.content == successful_response_content
+
+    # Test retry for _ainvoke_llm_combine_summaries
+    mock_llm_for_pipeline.ainvoke.reset_mock()
+    mock_llm_for_pipeline.ainvoke.side_effect = [
+        fail_exception, 
+        fail_exception, 
+        mock_successful_llm_response
+    ]
+    result_combine = await pipeline._ainvoke_llm_combine_summaries("Test prompt for combine summaries")
+    assert mock_llm_for_pipeline.ainvoke.call_count == 3
+    assert result_combine.content == successful_response_content
+
+    # Test retry for _ainvoke_llm_generate_final
+    mock_llm_for_pipeline.ainvoke.reset_mock()
+    mock_llm_for_pipeline.ainvoke.side_effect = [
+        fail_exception, 
+        fail_exception, 
+        mock_successful_llm_response
+    ]
+    result_final = await pipeline._ainvoke_llm_generate_final("Test prompt for final summary")
+    assert mock_llm_for_pipeline.ainvoke.call_count == 3
+    assert result_final.content == successful_response_content
+
+    # Test retry exhaustion for one of the methods (e.g., _ainvoke_llm_summarize_chunk)
+    mock_llm_for_pipeline.ainvoke.reset_mock()
+    # Configure to fail for all 3 attempts + 1 more (though tenacity stops at 3)
+    mock_llm_for_pipeline.ainvoke.side_effect = [
+        fail_exception, 
+        fail_exception, 
+        fail_exception, 
+        fail_exception # This 4th one should not be reached
+    ] 
+    with pytest.raises(Exception, match="LLM call failed intentionally for test"):
+        await pipeline._ainvoke_llm_summarize_chunk("Test prompt for exhaustion")
+    assert mock_llm_for_pipeline.ainvoke.call_count == 3 # As per stop_after_attempt(3)
+
+
+@pytest.mark.asyncio
+@patch.object(SummarizationPipeline, '_ainvoke_llm_combine_summaries', new_callable=AsyncMock)
+async def test_acombine_summaries_batch_prompt_and_length(mock_ainvoke_combine: AsyncMock):
+    # 1. Setup
+    mock_reader = MockReader(documents=[])
+    mock_splitter = MockTokenSplitter()
+    mock_llm = MockLLM() # Actual LLM object for pipeline, its ainvoke is not directly called here
+    mock_embedding_model = MockEmbeddings()
+
+    pipeline = SummarizationPipeline(
+        reader=mock_reader,
+        text_splitter=mock_splitter,
+        llm=mock_llm,
+        embedding_model=mock_embedding_model,
+        target_consolidated_summary_tokens=150 # Set specific value for testing
+    )
+
+    # Mock the return value of the helper to avoid issues if it's not a string/MockLLMResponse
+    mock_ainvoke_combine.return_value = MockLLMResponse("Mocked combined summary")
+
+    summaries_batch = ["First summary.", "Second summary."]
+    
+    # 2. Test Call with Target Tokens
+    await pipeline._acombine_summaries_batch(
+        summaries_batch, 
+        target_tokens=pipeline.target_consolidated_summary_tokens
+    )
+    
+    # 4. Assertions (Call with Target Tokens)
+    mock_ainvoke_combine.assert_called_once()
+    # The prompt is the first argument to the PromptTemplate constructor,
+    # which is then populated and passed to _ainvoke_llm_combine_summaries.
+    # The argument to _ainvoke_llm_combine_summaries is the populated prompt string.
+    args_list, kwargs_list = mock_ainvoke_combine.call_args
+    prompt_passed_to_llm_helper = args_list[0]
+        
+    assert "You are part of a hierarchical summarization process." in prompt_passed_to_llm_helper
+    assert f"approximately {pipeline.target_consolidated_summary_tokens} tokens long" in prompt_passed_to_llm_helper
+    assert "First summary." in prompt_passed_to_llm_helper
+    assert "Second summary." in prompt_passed_to_llm_helper
+
+    # 5. Test Call without Target Tokens
+    mock_ainvoke_combine.reset_mock()
+    # Re-assign return value as reset_mock clears it.
+    mock_ainvoke_combine.return_value = MockLLMResponse("Mocked combined summary no length")
+
+    await pipeline._acombine_summaries_batch(summaries_batch, target_tokens=None)
+    
+    # Assertions (Call without Target Tokens)
+    mock_ainvoke_combine.assert_called_once()
+    args_list_no_len, kwargs_list_no_len = mock_ainvoke_combine.call_args
+    prompt_no_length = args_list_no_len[0]
+        
+    assert "You are part of a hierarchical summarization process." in prompt_no_length
+    assert "approximately" not in prompt_no_length # Check that length guidance is absent
+    assert "First summary." in prompt_no_length
+    assert "Second summary." in prompt_no_length
 ```

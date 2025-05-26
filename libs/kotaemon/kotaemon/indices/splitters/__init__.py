@@ -1,4 +1,5 @@
 from ..base import DocTransformer, LlamaIndexDocTransformerMixin
+from .semantic_splitter import DynamicSemanticSplitter
 
 
 class BaseSplitter(DocTransformer):
