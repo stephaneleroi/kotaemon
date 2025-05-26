@@ -12,33 +12,59 @@ from kotaemon.embeddings.base import BaseEmbeddings # Added for future use
 class SummarizationPipeline(BaseComponent):
     '''
     A pipeline for summarizing a collection of documents.
+
+    It supports contextual summarization by passing the summary of the
+    previous chunk to the current one, and allows for length guidance for
+    both individual chunk summaries and the final output.
     '''
     
     reader: Union[BaseReader, DirectoryReader, AutoReader]
     text_splitter: TokenSplitter
     llm: BaseLLM
-    # embedding_model: Optional[BaseEmbeddings] = None # For future use
+    embedding_model: Optional[BaseEmbeddings] = None
     # target_summary_length: str = "5 pages" # Example, will need better handling
     max_summaries_per_consolidation_batch: int
     target_number_of_summaries_for_final_step: int
     target_summary_length_tokens: int
+    target_chunk_summary_tokens: int
 
     def __init__(
         self,
         reader: Union[BaseReader, DirectoryReader, AutoReader],
         text_splitter: TokenSplitter,
         llm: BaseLLM,
+        embedding_model: Optional[BaseEmbeddings] = None,
         max_summaries_per_consolidation_batch: int = 5,
         target_number_of_summaries_for_final_step: int = 1,
         target_summary_length_tokens: int = 2000,
-        # embedding_model: Optional[BaseEmbeddings] = None, # For future use
+        target_chunk_summary_tokens: int = 250,
         # target_summary_length: str = "5 pages", # Example
         **kwargs,
     ):
+        """
+        Initializes the SummarizationPipeline.
+
+        Args:
+            reader: Component to load documents.
+            text_splitter: Component to split documents into chunks.
+            llm: Language model to use for summarization.
+            embedding_model: Optional embedding model for future contextual
+                enhancements.
+            max_summaries_per_consolidation_batch: Max summaries to combine
+                in one LLM call during consolidation.
+            target_number_of_summaries_for_final_step: Target number of
+                summaries before the final summarization step.
+            target_summary_length_tokens: Target token length for the
+                final summary.
+            target_chunk_summary_tokens: Target token length for individual
+                chunk summaries.
+            **kwargs: Additional keyword arguments for BaseComponent.
+        """
         super().__init__(**kwargs)
         self.reader = reader
         self.text_splitter = text_splitter
         self.llm = llm
+        self.embedding_model = embedding_model
         self.max_summaries_per_consolidation_batch = (
             max_summaries_per_consolidation_batch
         )
@@ -46,7 +72,7 @@ class SummarizationPipeline(BaseComponent):
             target_number_of_summaries_for_final_step
         )
         self.target_summary_length_tokens = target_summary_length_tokens
-        # self.embedding_model = embedding_model # For future use
+        self.target_chunk_summary_tokens = target_chunk_summary_tokens
         # self.target_summary_length = target_summary_length # Example
 
     def run(self, documents_path: str, **kwargs) -> Document:
@@ -83,6 +109,9 @@ class SummarizationPipeline(BaseComponent):
         
         print(f"Loaded {len(documents)} document(s).")
         
+        # TODO: Future enhancement: Implement a dynamic chunking strategy. The current TokenSplitter
+        # uses fixed-size chunks. Consider adapting chunk size based on total input document length,
+        # desired final summary length, and LLM context window size for optimal performance and coherence.
         chunks = self.text_splitter.run(documents)
         print(f"Split documents into {len(chunks)} chunk(s).")
         
@@ -98,8 +127,17 @@ class SummarizationPipeline(BaseComponent):
             }
 
         print(f"Starting summarization of {len(chunks)} chunks...")
-        chunk_summary_tasks = [self._asummarize_chunk(chunk) for chunk in chunks]
-        list_of_initial_summaries = await asyncio.gather(*chunk_summary_tasks)
+        list_of_initial_summaries = []
+        previous_summary = None
+        for chunk_idx, chunk in enumerate(chunks):
+            print(f"Summarizing chunk {chunk_idx + 1}/{len(chunks)}...")
+            summary_str = await self._asummarize_chunk(
+                chunk,
+                previous_chunk_summary=previous_summary,
+                target_tokens=self.target_chunk_summary_tokens,
+            )
+            list_of_initial_summaries.append(summary_str)
+            previous_summary = summary_str  # Update for the next iteration
         print(f"Finished summarizing {len(list_of_initial_summaries)} chunks.")
 
         # Hierarchical consolidation
@@ -185,10 +223,29 @@ class SummarizationPipeline(BaseComponent):
         
         return Document(content=final_summary_text, metadata=metadata)
 
-    async def _asummarize_chunk(self, chunk: Document) -> str:
-        """Summarize a single document chunk."""
+    async def _asummarize_chunk(
+        self,
+        chunk: Document,
+        previous_chunk_summary: Optional[str] = None,
+        target_tokens: Optional[int] = None,
+    ) -> str:
+        """
+        Summarize a single document chunk.
+
+        Optionally uses context from the previous chunk's summary and can target
+        a specific token length for the generated summary.
+
+        Args:
+            chunk: The document chunk to summarize.
+            previous_chunk_summary: Summary of the preceding chunk, for
+                contextual summarization.
+            target_tokens: Target token length for this specific chunk's summary.
+
+        Returns:
+            The summary string for the chunk.
+        """
         text_to_summarize = chunk.text
-        if not text_to_summarize: # Check if text is empty or None
+        if not text_to_summarize:  # Check if text is empty or None
             page_content = getattr(chunk, 'page_content', '') 
             if not page_content and hasattr(chunk, 'content'):
                  page_content = str(getattr(chunk, 'content', '')) 
@@ -196,11 +253,28 @@ class SummarizationPipeline(BaseComponent):
                  print(f"Warning: Chunk {getattr(chunk, 'id_', 'N/A')} has no 'text', 'page_content', or 'content' attribute or it's empty. Returning empty summary.")
                  return ""
             text_to_summarize = page_content
-        
-        prompt_template = PromptTemplate(
-            template="Summarize the following text factually, focusing on key information: {text}"
-        )
-        prompt = prompt_template.populate(text=text_to_summarize)
+
+        populate_params = {"text": text_to_summarize}
+
+        if previous_chunk_summary:
+            template = (
+                "Given the previous context: {previous_summary}\n\n"
+                "Summarize the following text factually, focusing on key information "
+                "and its relation to the context. Ensure the summary is concise and "
+                "informative"
+            )
+            populate_params["previous_summary"] = previous_chunk_summary
+        else:
+            template = "Summarize the following text factually, focusing on key information."
+
+        if target_tokens:
+            template += " The summary should be approximately {target_tokens} tokens long: {text}"
+            populate_params["target_tokens"] = target_tokens
+        else:
+            template += ": {text}"
+            
+        prompt_template = PromptTemplate(template=template)
+        prompt = prompt_template.populate(**populate_params)
         
         llm_response = await self.llm.ainvoke(prompt)
         
