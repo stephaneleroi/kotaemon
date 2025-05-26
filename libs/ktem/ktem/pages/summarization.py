@@ -1,7 +1,9 @@
 import asyncio
 import gradio as gr
 from kotaemon.llms.summarization import SummarizationPipeline
-from kotaemon.schema import Document
+from kotaemon.base.schema import Document
+from kotaemon.loaders import AutoReader
+from kotaemon.indices.splitters import TokenSplitter
 
 class SummarizationPage:
     def __init__(self, app):
@@ -52,11 +54,15 @@ class SummarizationPage:
             except Exception as e:
                 gr.Warning(f"Error accessing LLM context window: {str(e)}. Using default chunk size: {dynamic_chunk_size}")
 
+            reader = AutoReader("PDFReader")  # Adapter selon le type de document si besoin
+            text_splitter = TokenSplitter(chunk_size=dynamic_chunk_size)
+
             pipeline = SummarizationPipeline(
+                reader=reader,
+                text_splitter=text_splitter,
                 llm=llm_instance,
-                target_llm_token_length=target_llm_token_length,
-                text_splitter_chunk_size=dynamic_chunk_size,
-                consolidation_batch_size=batch_size,
+                max_summaries_per_consolidation_batch=batch_size,
+                target_summary_length_tokens=target_llm_token_length,
             )
             
             default_llm_name = "default LLM"
@@ -68,7 +74,7 @@ class SummarizationPage:
             # Assuming pipeline.arun can take a path directly.
             # If it expects content, file loading logic would be needed here.
             # For now, let's assume it handles file paths or directory paths.
-            result_doc = await pipeline.arun(path=doc_path)
+            result_doc = await pipeline.arun(documents_path=doc_path)
             
             summary_text = result_doc.text
             metadata = result_doc.metadata

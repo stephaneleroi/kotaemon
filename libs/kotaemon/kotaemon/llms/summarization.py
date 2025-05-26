@@ -76,14 +76,14 @@ class SummarizationPipeline(BaseComponent):
         if isinstance(self.reader, DirectoryReader):
             documents = self.reader.load_data(input_dir=documents_path)
         elif isinstance(self.reader, AutoReader):
-            documents = self.reader.load_data(file_path=documents_path)
+            documents = self.reader.load_data(file=documents_path)
         else:
             # Assuming a generic BaseReader or other compatible reader
-            documents = self.reader.load_data(documents_path)
+            documents = self.reader.load_data(file=documents_path)
         
         print(f"Loaded {len(documents)} document(s).")
         
-        chunks = self.text_splitter.split_documents(documents)
+        chunks = self.text_splitter.run(documents)
         print(f"Split documents into {len(chunks)} chunk(s).")
         
         # In future steps, these chunks will be summarized.
@@ -200,7 +200,7 @@ class SummarizationPipeline(BaseComponent):
         prompt_template = PromptTemplate(
             template="Summarize the following text factually, focusing on key information: {text}"
         )
-        prompt = str(prompt_template.format(text=text_to_summarize))
+        prompt = prompt_template.populate(text=text_to_summarize)
         
         llm_response = await self.llm.ainvoke(prompt)
         
@@ -229,7 +229,7 @@ class SummarizationPipeline(BaseComponent):
                      "mentioned in the input summaries. Input summaries:\n"
                      "{text_of_combined_summaries}"
         )
-        prompt = str(prompt_template.format(text_of_combined_summaries=text_of_combined_summaries))
+        prompt = prompt_template.populate(text_of_combined_summaries=text_of_combined_summaries)
         
         llm_response = await self.llm.ainvoke(prompt)
         
@@ -267,10 +267,10 @@ class SummarizationPipeline(BaseComponent):
         )
         prompt_template = PromptTemplate(template=prompt_template_str)
         
-        prompt = str(prompt_template.format(
+        prompt = prompt_template.populate(
             text_to_summarize=full_text_for_final_summary,
             target_tokens=self.target_summary_length_tokens 
-        ))
+        )
         
         llm_response = await self.llm.ainvoke(prompt)
         

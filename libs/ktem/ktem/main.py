@@ -8,6 +8,8 @@ from ktem.pages.settings import SettingsPage
 from ktem.pages.summarization import SummarizationPage
 from ktem.pages.setup import SetupPage
 from theflow.settings import settings as flowsettings
+from ktem.llms.manager import llms
+from ktem.embeddings.manager import embedding_models_manager
 
 KH_DEMO_MODE = getattr(flowsettings, "KH_DEMO_MODE", False)
 KH_SSO_ENABLED = getattr(flowsettings, "KH_SSO_ENABLED", False)
@@ -39,6 +41,11 @@ class App(BaseApp):
         - Subscribe public events
         - Register events
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.llms = llms
+        self.embedding_models_manager = embedding_models_manager
 
     def ui(self):
         """Render the UI"""
